@@ -6,8 +6,8 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import fitz  # PyMuPDF
-from google import genai  # New import for the updated SDK
-import google.genai.types as types  # For configs like GenerateContentConfig
+import google.genai as genai
+from google.genai import types
 import pytesseract
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
@@ -673,7 +673,6 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[WARN] Embeddings init failed: {e}")
 
-    # Run dev server only if not in production (e.g., local machine)
-    port = int(os.getenv("PORT", 8000))  # Use $PORT if set, else 8000
-    debug = os.getenv("FLASK_DEBUG", "False").lower() in ("true", "1", "t")
-    app.run(host="0.0.0.0", port=port, debug=debug)
+    # Use $PORT if set (for Render), else 8000 locally
+    port = int(os.environ.get("PORT", 8000))
+    app.run(host="0.0.0.0", port=port, debug=False)  # Debug=False for prod safety
