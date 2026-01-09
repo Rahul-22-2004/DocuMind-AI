@@ -673,4 +673,7 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[WARN] Embeddings init failed: {e}")
 
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
+    # Run dev server only if not in production (e.g., local machine)
+    port = int(os.getenv("PORT", 8000))  # Use $PORT if set, else 8000
+    debug = os.getenv("FLASK_DEBUG", "False").lower() in ("true", "1", "t")
+    app.run(host="0.0.0.0", port=port, debug=debug)
