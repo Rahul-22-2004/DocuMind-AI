@@ -1,5 +1,4 @@
 # app.py
-
 import io
 import os
 import threading
@@ -7,13 +6,14 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import fitz  # PyMuPDF
-import google.generativeai as genai
+from google import genai  # New import for the updated SDK
+import google.genai.types as types  # For configs like GenerateContentConfig
 import pytesseract
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from langchain.embeddings.base import Embeddings
-from langchain.text_splitter import \
+from langchain_text_splitters import \
     RecursiveCharacterTextSplitter  # (default text splitter)
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.embeddings import SentenceTransformerEmbeddings
@@ -45,8 +45,11 @@ os.makedirs(VECTOR_DIR, exist_ok=True)
 
 # --- Gemini API Key for Chat and (optional) Embeddings ---
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "")
-if GOOGLE_API_KEY:
-    genai.configure(api_key=GOOGLE_API_KEY)
+if not GOOGLE_API_KEY:
+    raise ValueError("GOOGLE_API_KEY is required.")
+
+# Create a global client for the new GenAI SDK (replaces genai.configure)
+client = genai.Client(api_key=GOOGLE_API_KEY)
 
 # --- Optional Tesseract Path for Windows ---
 TESSERACT_CMD = os.getenv("TESSERACT_CMD", r"C:\Program Files\Tesseract-OCR\tesseract.exe")
@@ -305,38 +308,6 @@ def messages_to_history_str(messages: List[Dict[str, str]], max_turns: int = 6) 
     return "\n".join(lines)
 
 
-def condense_question(question: str, session_id: str) -> str:
-    """
-    Rewrite a follow-up question into a standalone question using recent chat history.
-    Uses Gemini 1.5 Flash for a concise reformulation.
-    """
-    if not GOOGLE_API_KEY:
-        return question  # No LLM configured; skip condensation
-
-    history = CHAT_SESSIONS.get(session_id, [])
-    if not history:
-        return question
-
-    history_str = messages_to_history_str(history, max_turns=6)
-    prompt = (
-        "Rewrite the follow-up question into a standalone question that can be understood without chat history. "
-        "Only use information present in the chat history.\n\n"
-        f"Chat history:\n{history_str}\n\n"
-        f"Follow-up question: {question}\n\n"
-        "Standalone question:"
-    )
-
-    try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        resp = model.generate_content(prompt)
-        if resp and resp.text:
-            return resp.text.strip()
-    except Exception as e:
-        print(f"[WARN] condense_question failed: {e}")
-
-    return question
-
-
 def format_docs_for_context(docs: List[Document]) -> str:
     """
     Create a compact context string from retrieved documents, with citations.
@@ -357,43 +328,93 @@ def retrieve_top_k(query: str, k: int = TOP_K_DEFAULT) -> List[Document]:
     if store is None:
         return []
     retriever = store.as_retriever(search_type="similarity", search_kwargs={"k": k})
-    return retriever.get_relevant_documents(query)
+    return retriever.invoke(query)
 
 
-def answer_with_gemini(question: str, docs: List[Document]) -> Tuple[str, List[Dict[str, Any]]]:
+def condense_question(question: str, session_id: str) -> str:
     """
-    Generate a concise, source-backed answer using Gemini 1.5 Flash.
-    Returns (answer_text, citations_list).
+    Condense the question using Gemini, considering chat history.
+    Fallback to original question on error.
     """
-    if not GOOGLE_API_KEY:
-        raise RuntimeError("GOOGLE_API_KEY not set. Cannot answer with Gemini.")
+    try:
+        history = CHAT_SESSIONS.get(session_id, [])
+        if not history:
+            return question  # No history, no need to condense
 
-    context = format_docs_for_context(docs)
-    prompt = (
-        "You are a concise assistant. Use ONLY the provided context to answer the question.\n"
-        "Always cite sources in brackets like [doc_id p.page]. If the answer is not in the context, say you don't know.\n\n"
-        f"Question: {question}\n\nContext:\n{context}\n\nAnswer:"
-    )
+        # Build prompt with history (example; adjust your prompt as needed)
+        prompt = f"Given this chat history: {history}\n\nCondense this follow-up question into a standalone question: {question}"
 
-    model = genai.GenerativeModel("gemini-1.5-flash")
-    resp = model.generate_content(prompt)
-    answer = (resp.text or "").strip() if resp else ""
+        response = client.models.generate_content(
+            model="gemini-flash-latest",  # Use a valid, fast model
+            contents=[{"role": "user", "parts": [{"text": prompt}]}],
+            config=types.GenerateContentConfig(temperature=0.0)  # Low temp for factual tasks
+        )
+        return response.candidates[0].content.parts[0].text.strip()
+    except Exception as e:
+        print(f"[WARN] condense_question failed: {e}")
+        return question
 
-    # Build citations list (top-k docs metadata)
-    citations: List[Dict[str, Any]] = []
-    for d in docs:
-        m = d.metadata or {}
-        citations.append({
-            "doc_id": m.get("doc_id"),
-            "page": m.get("page"),
-            "source": m.get("source"),
-            "kind": m.get("kind")
-        })
-    return answer, citations
+def answer_with_gemini(standalone_q: str, docs: List[Document]) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    Generate an answer using Gemini with retrieved docs as context.
+    Returns (answer, citations).
+    """
+    try:
+        if not docs:
+            return "I don't have enough information from the uploaded documents to answer this question.", []
 
+        # Build clean context
+        context_parts = []
+        citations = []
+        for i, doc in enumerate(docs):
+            source = doc.metadata.get("source", "Unknown document")
+            page = doc.metadata.get("page", "unknown")
+            context_parts.append(f"From {source} (page {page}):\n{doc.page_content.strip()}")
+            
+            citations.append({
+                "doc_id": i + 1,
+                "source": source,
+                "page": page,
+                "kind": "text"
+            })
 
+        context = "\n\n".join(context_parts)
 
+        prompt = f"""You are an expert assistant that answers questions STRICTLY based ONLY on the provided context from the uploaded document. 
 
+Context:
+{context}
+
+Question: {standalone_q}
+
+Rules:
+- Use ONLY information explicitly present in the context above.
+- If the context does not contain enough information to answer fully or accurately, say "The uploaded document does not provide sufficient details on this specific point."
+- Do NOT add general knowledge or information not directly stated in the context.
+- Answer clearly and naturally, using bullet points or numbered lists when appropriate.
+- List exactly the scopes/points mentioned in the context.
+- At the end, add: "Sources: Based on {len(docs)} retrieved section(s) from the uploaded document."
+
+Answer:"""
+
+        response = client.models.generate_content(
+            model="gemini-flash-latest",
+            contents=[{"role": "user", "parts": [{"text": prompt}]}],
+            config=types.GenerateContentConfig(
+                temperature=0.3,
+                max_output_tokens=1024
+            )
+        )
+        answer = response.candidates[0].content.parts[0].text.strip()
+
+        # Optional: append a clean source note if not in response
+        if "Sources:" not in answer:
+            answer += f"\n\nSources: Based on {len(citations)} page(s) from the uploaded document(s)."
+
+        return answer, citations
+    except Exception as e:
+        print(f"[ERROR] answer_with_gemini failed: {e}")
+        return "Sorry, I encountered an error while generating the answer.", []
 
 # =============================================================================
 # Flask Endpoints

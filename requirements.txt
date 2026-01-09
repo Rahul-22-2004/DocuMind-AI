@@ -15,7 +15,7 @@ faiss-cpu
 sentence-transformers
 
 # Google AI
-google-generativeai
+google-genai
 
 # Document & Image Processing
 PyMuPDF
