@@ -4,7 +4,6 @@ import os
 import threading
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
-
 import fitz  # PyMuPDF
 import google.genai as genai
 from google.genai import types
