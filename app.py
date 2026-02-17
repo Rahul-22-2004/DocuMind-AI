@@ -86,24 +86,33 @@ _EMBEDDINGS: Optional[Embeddings] = None
 # =============================================================================
 
 def get_embeddings() -> Embeddings:
-    """
-    Return a shared embeddings instance based on EMBEDDING_BACKEND.
-    - "minilm": sentence-transformers/all-MiniLM-L6-v2 (CPU-friendly)
-    - "gemini": Google text-embedding-004 (requires GOOGLE_API_KEY)
-    """
     global _EMBEDDINGS
     if _EMBEDDINGS is not None:
+        print("[DEBUG] Returning cached embeddings")
         return _EMBEDDINGS
+
+    print(f"[DEBUG] Initializing embeddings with backend: {EMBEDDING_BACKEND}")
 
     if EMBEDDING_BACKEND == "gemini":
         if not GOOGLE_API_KEY:
             raise RuntimeError("GOOGLE_API_KEY is required for Gemini embeddings.")
-        _EMBEDDINGS = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+        try:
+            print("[DEBUG] Creating GoogleGenerativeAIEmbeddings with model='models/gemini-embedding-001'")
+            _EMBEDDINGS = GoogleGenerativeAIEmbeddings(
+                model="models/gemini-embedding-001",
+                google_api_key=GOOGLE_API_KEY  # explicitly pass (sometimes helps)
+            )
+            print("[DEBUG] Gemini embeddings created successfully")
+        except Exception as e:
+            print(f"[ERROR] Failed to create Gemini embeddings: {e}")
+            raise  # re-raise so we see it at startup or first use
     else:
-        # Default local embedding
-        _EMBEDDINGS = SentenceTransformerEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    return _EMBEDDINGS
+        print("[DEBUG] Using local MiniLM embeddings")
+        _EMBEDDINGS = SentenceTransformerEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2"
+        )
 
+    return _EMBEDDINGS
 
 def load_vector_store(allow_create_empty: bool = True) -> Optional[FAISS]:
     """
